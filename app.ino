@@ -1,23 +1,24 @@
 #include "U8glib.h"
 #include <Arduino.h>
-#include <eRCaGuy_NewAnalogRead.h>
+#include <eRCaGuy_analogReadXXbit.h>
 
- 
 U8GLIB_NHD_C12864 u8g(13, 11, 10, 9, 8);    // SPI Com: SCK = 13, MOSI = 11, CS = 10, CD = 9, RST = 8
+
+// temperatureSensor + oversampling
+eRCaGuy_analogReadXXbit adc;
+const uint8_t temperatureSensorPin = A1; //analogRead pin
+const uint8_t bits_of_precision = 12;
+const unsigned long num_samples = 10;
+const float MAX_READING_12_bit = 2^bits_of_precision;
+
+// temperatureSensor
+long tempSensorValue = 0;
+int tempSensorAnalogPin = A1;
+float currentTemperature = 0.0;
 
 //joystick
 int joystickValue = 0;
 int joystickAnalogPin = A0;
-
-//czujnik temperatury
-long tempSensorValue = 0;
-int tempSensorAnalogPin = A1;
-double currentTemperature = 0.0;
-
-//oversampling
-byte bitsOfResolution = 12; //commanded oversampled resolution
-unsigned long numSamplesToAvg = 1; //number of samples AT THE OVERSAMPLED RESOLUTION that you want to take and average
-ADC_prescaler_t ADCSpeed = ADC_FAST;
 
 //relay
 int relayPin = 4;
@@ -31,32 +32,33 @@ long timerTimestamp = 0;
 //offset
 double offset=0.5;
 
-void setup(void) {  
+//resistance calculation
+const int Vin= 5;
+float Vout= 0;
+const float Rknown= 116.5;
+float buffer= 0;
+
+void setup() 
+{
   setupScreen();
   pinMode(relayPin, OUTPUT);
   digitalWrite(relayPin, HIGH); // HIGH to wyłączony
-
-  adc.setADCSpeed(ADCSpeed);
-  adc.setBitsOfResolution(bitsOfResolution);
-  adc.setNumSamplesToAvg(numSamplesToAvg);
-
-  Serial.begin(9600);
+//  Serial.begin(9600);
 }
 
-void loop(void) {
+void loop() 
+{
   joystickValue = analogRead(joystickAnalogPin);
-  tempSensorValue = adc.newAnalogRead(tempSensorAnalogPin);
-  Serial.println(tempSensorValue);
+  tempSensorValue = (long)getAnalogInput();
   currentTemperature = tempSensorToCelsius(tempSensorValue);
-
   switchRelayIfTargetReached();
   listenJoystickForTargetTemperature();
-  
+
   u8g.firstPage(); 
   do {
     draw();
   }while( u8g.nextPage() );
-  delay(300);
+  delay(200);
 }
 
 void draw(void){
@@ -76,14 +78,26 @@ void draw(void){
 
   //temp sensor
   u8g.setPrintPos( 0, 30 );
-  u8g.print("TEMP: ");
+  u8g.print("RAWTEMP10: ");
+  u8g.print(tempSensorValue);
   if(isTempSensorConnected()){
     u8g.print(currentTemperature);
   }else{
     u8g.print("OFF");
   }
+  u8g.setPrintPos( 0, 40 );
+  u8g.print("VOLTS: ");
+  u8g.print(tempSensorValue/MAX_READING_12_bit*5.0);
 
-  //joystick
+  u8g.setPrintPos( 0, 50 );
+  u8g.print("OHMS: ");
+  u8g.print(resistance(tempSensorValue));
+
+  u8g.setPrintPos( 0, 60 );
+  u8g.print("TEMP: ");
+  u8g.print(currentTemperature);
+
+  //timer
   u8g.setPrintPos( 0, 40 );
   u8g.print("RUNNING: ");
   u8g.print((millis()-timerTimestamp)/1000/60);
@@ -92,8 +106,46 @@ void draw(void){
     u8g.print("0");
   }
   u8g.print((millis()-timerTimestamp)/1000%60);
-
 }
+
+float resistanceToTemperature(float input){
+  return 2.6048*input-260.84;
+}
+float resistance(long raw_input){
+  buffer = raw_input * Vin;
+  Vout = buffer/(2^bits_of_precision);
+  buffer = (Vin/Vout) -1;
+  return Rknown * buffer;
+}
+
+float getAnalogInput(){
+  //float V = analog_reading/MAX_READING_12_bit*5.0; //voltage
+  return adc.analogReadXXbit(temperatureSensorPin,bits_of_precision,num_samples);
+}
+
+void setupScreen(void){
+  u8g.setContrast(0); // Config the contrast to the best effect
+  u8g.setRot180();// rotate screen, if require
+  if ( u8g.getMode() == U8G_MODE_R3G3B2 )
+  {u8g.setColorIndex(255);}else if ( u8g.getMode() == U8G_MODE_GRAY2BIT )
+  {u8g.setColorIndex(3);}else if ( u8g.getMode() == U8G_MODE_BW ) 
+  {u8g.setColorIndex(1);}else if ( u8g.getMode() == U8G_MODE_HICOLOR )
+  {u8g.setHiColorByRGB(255,255,255);}
+  u8g.setFont(u8g_font_7x13B);
+}
+
+bool relayStatus(void){
+  if(digitalRead(relayPin) == 0){
+    return true;
+  }else{
+    return false;
+  }
+}
+
+bool isTempSensorConnected(void){
+  return (currentTemperature > 0 && currentTemperature < 120);
+}
+
 
 void listenJoystickForTargetTemperature(void){
   if(joystickValue > 700 && joystickValue < 900){
@@ -129,32 +181,7 @@ void switchRelayIfTargetReached(void){
   }
 }
 
-bool relayStatus(void){
-  if(digitalRead(relayPin) == 0){
-    return true;
-  }else{
-    return false;
-  }
-}
 
-bool isTempSensorConnected(void){
-  return (tempSensorValue > 400*4 && tempSensorValue < 700*4);
+float tempSensorToCelsius(float input){
+  return resistanceToTemperature(resistance(input));
 }
-
-double tempSensorToCelsius(float input){
- input = (1023.0/(1023.0 - (input/4.0))-1.0)*100.0;
- return (((input/100)-1)/(3.9083*0.001))-12.7;
-}
-
-
-void setupScreen(void){
-  u8g.setContrast(0); // Config the contrast to the best effect
-  u8g.setRot180();// rotate screen, if require
-  if ( u8g.getMode() == U8G_MODE_R3G3B2 )
-  {u8g.setColorIndex(255);}else if ( u8g.getMode() == U8G_MODE_GRAY2BIT )
-  {u8g.setColorIndex(3);}else if ( u8g.getMode() == U8G_MODE_BW ) 
-  {u8g.setColorIndex(1);}else if ( u8g.getMode() == U8G_MODE_HICOLOR )
-  {u8g.setHiColorByRGB(255,255,255);}
-  u8g.setFont(u8g_font_7x13B);
-}
- 
